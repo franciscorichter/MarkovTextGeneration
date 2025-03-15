@@ -2,14 +2,14 @@ library(shiny)
 library(bslib)
 library(visNetwork)
 
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # 1) Load Preprocessed Data
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 preprocessed_corpora <- readRDS("preprocessed_corpora.rds")
 
-# -------------------------------------------------------------------------
-# 2) Map user-friendly names to corpus keys
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# 2) Map User-Friendly Names to Corpus Keys
+# ----------------------------------------------------------------------------
 text_files <- c(
   "Shakespeare - All's Well"                 = "allswell",
   "Oscar Wilde - The Picture of Dorian Gray" = "doriangray",
@@ -30,15 +30,14 @@ text_files <- c(
   "Dr Seuss"                                 = "drseuss"
 )
 
-# -------------------------------------------------------------------------
-# 3) Shared Functions
-# -------------------------------------------------------------------------
-
-# Simple Markov chain text generator
+# ----------------------------------------------------------------------------
+# 3) Markov Chain Generator for Text
+# ----------------------------------------------------------------------------
 generate_chain <- function(canon, n.words = 10, depth = 2, seed = NULL) {
   n.tot <- length(canon)
   if (n.tot == 0) return(character(0))
   
+  # If no seed, pick a random start
   if (is.null(seed) || length(seed) == 0) {
     if (n.tot < depth) return(character(0))
     start <- sample(1:(n.tot - depth), 1)
@@ -47,6 +46,7 @@ generate_chain <- function(canon, n.words = 10, depth = 2, seed = NULL) {
     book <- seed
   }
   
+  # Build chain
   while (length(book) < n.words) {
     lb <- length(book)
     tempdepth <- if (lb < depth) lb else depth
@@ -69,7 +69,9 @@ generate_chain <- function(canon, n.words = 10, depth = 2, seed = NULL) {
   book
 }
 
-# Build transition matrix
+# ----------------------------------------------------------------------------
+# 4) Build Transition Matrix (for the tree)
+# ----------------------------------------------------------------------------
 build_transition_matrix <- function(canon) {
   words <- unique(canon)
   T.mat <- matrix(0, nrow = length(words), ncol = length(words))
@@ -78,13 +80,23 @@ build_transition_matrix <- function(canon) {
     to   <- which(words == canon[i])
     T.mat[from, to] <- T.mat[from, to] + 1
   }
-  T.mat <- t(apply(T.mat, 1, function(x) if (sum(x) > 0) x/sum(x) else x))
+  # Convert counts to probabilities
+  T.mat <- t(apply(T.mat, 1, function(x) {
+    if (sum(x) > 0) x / sum(x) else x
+  }))
   dimnames(T.mat) <- list(words, words)
   T.mat
 }
 
-# Build a chain tree with top-K alternatives at each step.
-build_chain_tree <- function(chain, T.mat, topK = 3) {
+# ----------------------------------------------------------------------------
+# 5) Build Chain Tree
+#     - n_evolutions = how many words in the chain
+#     - branching_factor = K, the max # of alt edges per node
+#     - We do NOT break if the actual chosen next word is outside top K.
+# ----------------------------------------------------------------------------
+build_chain_tree <- function(chain, T.mat, branching_factor = 3) {
+  
+  # If chain is empty, return an "empty" network
   if (length(chain) < 1) {
     nodes <- data.frame(id = 1, label = "Empty chain", stringsAsFactors = FALSE)
     edges <- data.frame()
@@ -92,19 +104,29 @@ build_chain_tree <- function(chain, T.mat, topK = 3) {
   }
   
   words <- rownames(T.mat)
-  nodes <- data.frame(id = integer(0), label = character(0), stringsAsFactors = FALSE)
-  nodes$color.background <- character(0)
-  nodes$color.border <- character(0)
   
-  edges <- data.frame(from = integer(0), to = integer(0),
-                      label = character(0), color = character(0),
-                      stringsAsFactors = FALSE)
+  # Data frames for nodes & edges
+  nodes <- data.frame(
+    id                = integer(0),
+    label            = character(0),
+    color.background = character(0),
+    color.border     = character(0),
+    stringsAsFactors = FALSE
+  )
+  edges <- data.frame(
+    from  = integer(0),
+    to    = integer(0),
+    label = character(0),
+    color = character(0),
+    stringsAsFactors = FALSE
+  )
   
   node_counter <- 0
   create_node <- function(word, step, is_chosen = FALSE) {
     label_text <- paste0(step, ": ", word)
     node_counter <<- node_counter + 1
     new_id <- node_counter
+    
     if (is_chosen) {
       bg_col <- "#FFD700"  # gold
       br_col <- "#FFA500"  # orange
@@ -112,9 +134,12 @@ build_chain_tree <- function(chain, T.mat, topK = 3) {
       bg_col <- "#D1E1FF"
       br_col <- "#666666"
     }
+    
     nodes <<- rbind(nodes, data.frame(
-      id = new_id, label = label_text,
-      color.background = bg_col, color.border = br_col,
+      id                = new_id,
+      label            = label_text,
+      color.background = bg_col,
+      color.border     = br_col,
       stringsAsFactors = FALSE
     ))
     return(new_id)
@@ -122,149 +147,161 @@ build_chain_tree <- function(chain, T.mat, topK = 3) {
   
   create_edge <- function(from_id, to_id, prob, chosen = FALSE) {
     edge_col <- if (chosen) "red" else "#999999"
-    lbl <- sprintf("%.2f", prob)
+    lbl      <- sprintf("%.2f", prob)
     edges <<- rbind(edges, data.frame(
-      from = from_id, to = to_id,
-      label = lbl, color = edge_col, stringsAsFactors = FALSE
+      from  = from_id,
+      to    = to_id,
+      label = lbl,
+      color = edge_col,
+      stringsAsFactors = FALSE
     ))
   }
   
-  current_id <- create_node(chain[1], 1, is_chosen = TRUE)
+  # Create a node for the first word in the chain
+  current_id <- create_node(chain[1], step = 1, is_chosen = TRUE)
   
+  # For each step i in [1, length(chain)-1]
   for (i in seq_len(length(chain) - 1)) {
     current_word <- chain[i]
-    next_word <- chain[i + 1]
-    step_number <- i + 1
-    if (!(current_word %in% words)) break
-    row_idx <- which(words == current_word)
+    next_word    <- chain[i + 1]
+    step_number  <- i + 1
+    
+    if (!(current_word %in% words)) {
+      # If current_word doesn't exist in T.mat, we can't proceed
+      break
+    }
+    
+    row_idx   <- which(words == current_word)
     row_probs <- T.mat[row_idx, ]
     nonzero_idx <- which(row_probs > 0)
-    if (length(nonzero_idx) == 0) break
+    if (length(nonzero_idx) == 0) {
+      break
+    }
+    
+    # Sort them descending by probability
     sorted_idx <- nonzero_idx[order(row_probs[nonzero_idx], decreasing = TRUE)]
-    keep_idx <- head(sorted_idx, topK)
+    # Keep top K
+    keep_idx   <- head(sorted_idx, branching_factor)
+    
+    # Ensure the chosen next_word is also displayed, even if it's outside top K
+    chosen_idx <- which(words == next_word)
+    if (length(chosen_idx) == 1 && !(chosen_idx %in% keep_idx)) {
+      keep_idx <- c(keep_idx, chosen_idx)
+    }
+    keep_idx <- unique(keep_idx)
     
     chosen_child_id <- NA
+    
+    # Create child nodes for each candidate in keep_idx
     for (idx in keep_idx) {
-      candidate_word <- words[idx]
-      prob_val <- row_probs[idx]
-      is_chosen_child <- (candidate_word == next_word)
-      child_id <- create_node(candidate_word, step_number, is_chosen = is_chosen_child)
-      create_edge(current_id, child_id, prob_val, chosen = is_chosen_child)
-      if (is_chosen_child) chosen_child_id <- child_id
+      candidate_word   <- words[idx]
+      prob_val         <- row_probs[idx]
+      is_chosen_child  <- (candidate_word == next_word)
+      
+      child_id <- create_node(
+        word      = candidate_word,
+        step      = step_number,
+        is_chosen = is_chosen_child
+      )
+      create_edge(
+        from_id = current_id,
+        to_id   = child_id,
+        prob    = prob_val,
+        chosen  = is_chosen_child
+      )
+      
+      if (is_chosen_child) {
+        chosen_child_id <- child_id
+      }
     }
-    if (is.na(chosen_child_id)) break
-    current_id <- chosen_child_id
+    
+    # Even if the chosen word wasn't in keep_idx, we do NOT break.
+    # We continue with the chain. If chosen_child_id is NA, we'll just
+    # stay on the same node or break, depending on your preference.
+    if (!is.na(chosen_child_id)) {
+      current_id <- chosen_child_id
+    } else {
+      # If there's truly no child for the chosen word, you might break or pick another child.
+      # We'll break here, but you could remove this if you want to keep going anyway.
+      break
+    }
   }
+  
   list(nodes = nodes, edges = edges)
 }
 
-# Gather a subgraph for the Markov network
-gather_subgraph <- function(T.mat, start_word, chain_steps = 1) {
-  all_words <- rownames(T.mat)
-  if (!(start_word %in% all_words)) {
-    return(list(
-      nodes = data.frame(id = "Word not found", label = "Word not found", stringsAsFactors = FALSE),
-      edges = data.frame()
-    ))
-  }
-  visited <- character(0)
-  frontier <- c(start_word)
-  edges_df <- data.frame(from = character(0), to = character(0),
-                         weight = numeric(0), label = character(0),
-                         stringsAsFactors = FALSE)
-  for (step in seq_len(chain_steps)) {
-    new_frontier <- character(0)
-    for (w in frontier) {
-      idx <- which(T.mat[w, ] > 0)
-      if (length(idx) == 0) next
-      successors <- colnames(T.mat)[idx]
-      for (s in successors) {
-        w_prob <- T.mat[w, s]
-        edges_df <- rbind(edges_df, data.frame(
-          from = w, to = s, weight = w_prob,
-          label = sprintf("%.2f", w_prob),
-          stringsAsFactors = FALSE
-        ))
-      }
-      new_frontier <- c(new_frontier, successors)
-    }
-    visited <- unique(c(visited, frontier))
-    frontier <- setdiff(unique(new_frontier), visited)
-  }
-  visited <- unique(c(visited, frontier))
-  nodes_df <- data.frame(id = visited, label = visited, stringsAsFactors = FALSE)
-  edges_df <- edges_df[edges_df$from %in% visited & edges_df$to %in% visited, ]
-  list(nodes = nodes_df, edges = edges_df)
-}
-
-# -------------------------------------------------------------------------
-# 4) UI: Single Sidebar for All Tabs
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# 6) Shiny UI
+# ----------------------------------------------------------------------------
 ui <- fluidPage(
   theme = bs_theme(
     bootswatch = "cosmo",
-    base_font = font_google("Roboto"),
-    code_font = font_google("Fira Code")
+    base_font  = font_google("Roboto"),
+    code_font  = font_google("Fira Code")
   ),
+  
   titlePanel("Markov Text Generator"),
+  
   sidebarLayout(
     sidebarPanel(
       selectInput("selected_text", "Select a text source:", names(text_files)),
-      numericInput("n_words", "Number of words to generate:", 10, min = 1, max = 2000),
-      numericInput("depth", "Markov depth:", 2, min = 1, max = 5),
-      selectizeInput("seed_words", "Seed words (optional):", choices = NULL, multiple = TRUE,
-                     options = list(placeholder = "Type or select seed words", create = TRUE)),
-      # Extra parameters for Tree and Network tabs:
-      conditionalPanel(
-        condition = "input.main_tab != 'Text Generator'",
-        hr(),
-        h4("Additional Parameters")
+      
+      # Shared seed words
+      selectizeInput(
+        "seed_words",
+        "Seed words (optional):",
+        choices = NULL,
+        multiple = TRUE,
+        options = list(
+          placeholder = "Type or select seed words",
+          create = TRUE
+        )
       ),
+      
+      # Text Generator inputs
+      conditionalPanel(
+        condition = "input.main_tab == 'Text Generator'",
+        numericInput("n_words", "Number of words (Text Gen):", 10, min = 1, max = 2000),
+        numericInput("markov_depth", "Markov depth (Text Gen):", 2, min = 1, max = 5),
+        actionButton("generate_text", "Generate Text", class = "btn-primary")
+      ),
+      
+      # Chain Tree inputs
       conditionalPanel(
         condition = "input.main_tab == 'Chain Tree'",
-        numericInput("top_k_tree", "Top K alternatives:", 3, min = 1, max = 10)
-      ),
-      conditionalPanel(
-        condition = "input.main_tab == 'Markov Network'",
-        selectizeInput("starting_word", "Starting word:", choices = NULL,
-                       options = list(placeholder = "Select or type a word", create = TRUE)),
-        numericInput("chain_steps", "Network chain depth:", 1, min = 1, max = 10)
+        numericInput("n_evolutions", "Number of evolutions (Tree length):", 10, min = 1, max = 200),
+        numericInput("branching_factor", "Branching factor (Tree width):", 3, min = 1, max = 10),
+        actionButton("generate_tree", "Generate Tree", class = "btn-primary")
       )
     ),
     mainPanel(
       tabsetPanel(
         id = "main_tab",
+        
         tabPanel("Text Generator",
                  br(),
-                 actionButton("generate_text", "Generate Text", class = "btn-primary"),
-                 br(), br(),
                  verbatimTextOutput("generated_text")
         ),
+        
         tabPanel("Chain Tree",
                  br(),
-                 actionButton("generate_tree", "Generate Chain Tree", class = "btn-primary"),
-                 br(), br(),
                  visNetworkOutput("chain_tree_network", height = "600px")
-        ),
-        tabPanel("Markov Network",
-                 br(),
-                 actionButton("generate_network", "Generate Markov Network", class = "btn-primary"),
-                 br(), br(),
-                 visNetworkOutput("markov_network", height = "600px")
         )
       )
     )
   )
 )
 
-# -------------------------------------------------------------------------
-# 5) Server
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# 7) Shiny Server
+# ----------------------------------------------------------------------------
 server <- function(input, output, session) {
-  # Update seed words for Text Generator when text is selected
+  
+  # Update seed words after user picks a text
   observeEvent(input$selected_text, {
-    corpus_key <- text_files[[input$selected_text]]
-    canon <- preprocessed_corpora[[corpus_key]]
+    corpus_key <- text_files[[ input$selected_text ]]
+    canon <- preprocessed_corpora[[ corpus_key ]]
+    
     if (is.null(canon) || length(canon) == 0) {
       updateSelectizeInput(session, "seed_words", choices = NULL, server = TRUE)
     } else {
@@ -273,21 +310,27 @@ server <- function(input, output, session) {
     }
   })
   
-  # -----------------------------
-  # Tab 1: Text Generator
-  # -----------------------------
+  # ---------------------- Tab 1: Text Generator ----------------------
   observeEvent(input$generate_text, {
-    corpus_key <- text_files[[input$selected_text]]
-    canon <- preprocessed_corpora[[corpus_key]]
+    corpus_key <- text_files[[ input$selected_text ]]
+    canon <- preprocessed_corpora[[ corpus_key ]]
     if (is.null(canon) || length(canon) == 0) {
       output$generated_text <- renderText("Error: This corpus is empty or not found.")
       return()
     }
+    
     seed_vec <- input$seed_words
     if (length(seed_vec) == 0) seed_vec <- NULL
-    chain <- generate_chain(canon, n.words = input$n_words, depth = input$depth, seed = seed_vec)
+    
+    chain <- generate_chain(
+      canon   = canon,
+      n.words = input$n_words,
+      depth   = input$markov_depth,
+      seed    = seed_vec
+    )
+    
     if (length(chain) == 0) {
-      output$generated_text <- renderText("No text generated (not enough words?).")
+      output$generated_text <- renderText("No text generated (maybe not enough words?).")
     } else {
       output$generated_text <- renderText({
         paste(chain, collapse = " ")
@@ -295,105 +338,62 @@ server <- function(input, output, session) {
     }
   })
   
-  # -----------------------------
-  # Tab 2: Chain Tree
-  # -----------------------------
+  # ---------------------- Tab 2: Chain Tree ----------------------
   observeEvent(input$generate_tree, {
-    corpus_key <- text_files[[input$selected_text]]
-    canon <- preprocessed_corpora[[corpus_key]]
+    corpus_key <- text_files[[ input$selected_text ]]
+    canon <- preprocessed_corpora[[ corpus_key ]]
     if (is.null(canon) || length(canon) == 0) {
       output$chain_tree_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id = "Error"), edges = data.frame())
+        visNetwork(nodes = data.frame(id="Error"), edges=data.frame())
       })
       return()
     }
+    
+    # We'll fix Markov depth = 1 for the chain used in the tree
     T.mat <- build_transition_matrix(canon)
+    
     seed_vec <- input$seed_words
     if (length(seed_vec) == 0) seed_vec <- NULL
-    chain <- generate_chain(canon, n.words = input$n_words, depth = input$depth, seed = seed_vec)
+    
+    # Generate a chain of length n_evolutions, ignoring top K at generation time
+    chain <- generate_chain(
+      canon   = canon,
+      n.words = input$n_evolutions,
+      depth   = 1,   # fixed for the tree
+      seed    = seed_vec
+    )
+    
     if (length(chain) < 1) {
       output$chain_tree_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id = "No words generated"), edges = data.frame())
+        visNetwork(nodes = data.frame(id="No words generated"), edges=data.frame())
       })
       return()
     }
-    subg <- build_chain_tree(chain, T.mat, topK = input$top_k_tree)
+    
+    subg <- build_chain_tree(
+      chain,
+      T.mat,
+      branching_factor = input$branching_factor
+    )
     nodes <- subg$nodes
     edges <- subg$edges
     
-    # Safeguard: if the tree is too big, ask user to lower parameters
-    if (nrow(nodes) > 100) {
+    # If the tree is huge, show a message
+    if (nrow(nodes) > 150) {
       output$chain_tree_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id = "Too many nodes; please lower chain depth or top K."), edges = data.frame())
+        visNetwork(
+          nodes = data.frame(id="Tree is too large. Lower 'Number of evolutions' or 'Branching factor'."),
+          edges = data.frame()
+        )
       })
       return()
     }
     
     output$chain_tree_network <- renderVisNetwork({
       visNetwork(nodes, edges) %>%
-        visEdges(arrows = "to", smooth = FALSE) %>%
-        visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
-        visHierarchicalLayout(direction = "LR", levelSeparation = 200)
-    })
-  })
-  
-  # -----------------------------
-  # Tab 3: Markov Network
-  # -----------------------------
-  observeEvent(input$selected_text, {  # update starting word choices when text changes
-    corpus_key <- text_files[[input$selected_text]]
-    canon <- preprocessed_corpora[[corpus_key]]
-    if (is.null(canon) || length(canon) == 0) {
-      updateSelectizeInput(session, "starting_word", choices = NULL, server = TRUE)
-    } else {
-      all_words <- sort(unique(canon))
-      updateSelectizeInput(session, "starting_word", choices = all_words, server = TRUE)
-    }
-  })
-  
-  observeEvent(input$generate_network, {
-    corpus_key <- text_files[[input$selected_text]]
-    canon <- preprocessed_corpora[[corpus_key]]
-    if (is.null(canon) || length(canon) == 0) {
-      output$markov_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id = "Error"), edges = data.frame())
-      })
-      return()
-    }
-    T.mat <- build_transition_matrix(canon)
-    subg <- gather_subgraph(T.mat, input$starting_word, input$chain_steps)
-    nodes <- subg$nodes
-    edges <- subg$edges
-    if (nrow(nodes) == 1 && nodes$id[1] == "Word not found") {
-      output$markov_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id = "Starting word not found", label = "Starting word not found"), edges = data.frame())
-      })
-      return()
-    }
-    if (nrow(edges) == 0) {
-      if (nrow(nodes) == 0) {
-        output$markov_network <- renderVisNetwork({
-          visNetwork(nodes = data.frame(id = "No words found"), edges = data.frame())
-        })
-      } else {
-        output$markov_network <- renderVisNetwork({
-          visNetwork(nodes, edges = data.frame())
-        })
-      }
-      return()
-    }
-    nodes$color.background <- "#D1E1FF"
-    nodes$color.border <- "#666666"
-    start_idx <- which(nodes$id == input$starting_word)
-    if (length(start_idx) == 1) {
-      nodes$color.background[start_idx] <- "#FFD700"
-      nodes$color.border[start_idx] <- "#FFA500"
-    }
-    output$markov_network <- renderVisNetwork({
-      visNetwork(nodes, edges) %>%
-        visEdges(arrows = "to") %>%
-        visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
-        visLayout(randomSeed = 123)
+        visEdges(arrows="to", smooth=FALSE) %>%
+        visOptions(highlightNearest=TRUE, nodesIdSelection=TRUE) %>%
+        visHierarchicalLayout(direction="LR", levelSeparation=200)
     })
   })
 }

@@ -1,51 +1,48 @@
 library(shiny)
 library(bslib)
-library(igraph)
 library(visNetwork)
 
-#------------------------------------------------------------
-# 1) Preprocessing function
-#------------------------------------------------------------
-preproc <- function(canon) {
-  letter  <- "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRTSUVWXYZ"
-  letter  <- substring(letter, 1:nchar(letter), 1:nchar(letter))
-  delimit <- ".,;:?!"
-  delimit <- substring(delimit, 1:nchar(delimit), 1:nchar(delimit))
-  remov   <- c("\\", "\"", "/", "'")
-  newcanon <- NULL
-  n <- length(canon)
-  
-  for (i in seq_len(n)) {
-    nlet <- nchar(canon[i])
-    while (nlet > 0 && sum(substr(canon[i], nlet, nlet) == remov) > 0) {
-      canon[i] <- substr(canon[i], 1, nlet - 1)
-      nlet <- nlet - 1
-    }
-    if (nchar(canon[i]) > 0 && sum(substr(canon[i], 1, 1) == letter) > 0) {
-      nlet <- nchar(canon[i])
-      # If last char is punctuation, split it off
-      if (sum(substr(canon[i], nlet, nlet) == delimit) > 0) {
-        newcanon <- c(newcanon, substr(canon[i], 1, nlet - 1), substr(canon[i], nlet, nlet))
-      } else {
-        newcanon <- c(newcanon, canon[i])
-      }
-    }
-  }
-  newcanon
-}
+# -------------------------------------------------------------------------
+# 1) Load Preprocessed Data
+# -------------------------------------------------------------------------
+preprocessed_corpora <- readRDS("preprocessed_corpora.rds")
 
-#------------------------------------------------------------
-# 2) Markov chain text generation function
-#------------------------------------------------------------
-writer <- function(canon, n.words = 50, depth = 2, seed = NULL) {
+# -------------------------------------------------------------------------
+# 2) Map user-friendly names to corpus keys
+# -------------------------------------------------------------------------
+text_files <- c(
+  "Shakespeare - All's Well"                 = "allswell",
+  "Oscar Wilde - The Picture of Dorian Gray" = "doriangray",
+  "Douglas Adams - Hitchhiker's Guide"       = "DouglasAdams-HitchhikersGuide",
+  "Jane Austen - Pride and Prejudice"        = "JaneAusten-PrideAndPrejudice",
+  "E. E. Cummings - The Enormous Room"       = "EECummings-TheEnormousRoom",
+  "Joseph Conrad - Heart of Darkness"        = "JosephConrad-HeartOfDarkness",
+  "Aristotle - Categories"                   = "Aristotle-Categories",
+  "Lewis Carroll - Alice in Wonderland"      = "LewisCarroll-AlicesAdventuresInWonderland",
+  "James Joyce - Ulysses"                    = "JamesJoyce-Ulysses",
+  "Bram Stoker - Dracula"                    = "BramStoker-Dracula",
+  "Homer - Iliad"                            = "Homer-Iliad",
+  "Charles Darwin - On the Origin of Species"= "CharlesDarwin-OnTheOriginOfSpecies",
+  "King James Bible"                         = "KingJamesBible",
+  "Leo Tolstoy - War and Peace"              = "LeoTolstoy-WarAndPeace",
+  "Friedrich Nietzsche - Beyond Good & Evil" = "FriedrichNietzsche-BeyondGoodAndEvil",
+  "Charles Dickens - Great Expectations"     = "CharlesDickens-GreatExpectations",
+  "Dr Seuss"                                 = "drseuss"
+)
+
+# -------------------------------------------------------------------------
+# 3) Shared Functions
+# -------------------------------------------------------------------------
+
+# Simple Markov chain text generator
+generate_chain <- function(canon, n.words = 10, depth = 2, seed = NULL) {
   n.tot <- length(canon)
-  delimit <- c(".,;:?!")
-  delimit <- substring(delimit, 1:nchar(delimit), 1:nchar(delimit))
+  if (n.tot == 0) return(character(0))
   
   if (is.null(seed) || length(seed) == 0) {
-    if (n.tot < depth) return("")  # not enough words to seed
+    if (n.tot < depth) return(character(0))
     start <- sample(1:(n.tot - depth), 1)
-    book <- canon[start:(start + depth - 1)]
+    book  <- canon[start:(start + depth - 1)]
   } else {
     book <- seed
   }
@@ -69,22 +66,11 @@ writer <- function(canon, n.words = 50, depth = 2, seed = NULL) {
     }
     book <- c(book, selection)
   }
-  
-  verse <- ""
-  for (token in book) {
-    if (token %in% delimit) {
-      verse <- paste0(verse, token)
-    } else {
-      verse <- paste(verse, token)
-    }
-  }
-  paste(strwrap(verse, width = 80), collapse = "\n")
+  book
 }
 
-#------------------------------------------------------------
-# 3) Transition matrix
-#------------------------------------------------------------
-transition <- function(canon) {
+# Build transition matrix
+build_transition_matrix <- function(canon) {
   words <- unique(canon)
   T.mat <- matrix(0, nrow = length(words), ncol = length(words))
   for (i in seq_along(canon)[-1]) {
@@ -92,42 +78,111 @@ transition <- function(canon) {
     to   <- which(words == canon[i])
     T.mat[from, to] <- T.mat[from, to] + 1
   }
-  T.mat <- t(apply(T.mat, 1, function(x) if (sum(x) > 0) x / sum(x) else x))
+  T.mat <- t(apply(T.mat, 1, function(x) if (sum(x) > 0) x/sum(x) else x))
   dimnames(T.mat) <- list(words, words)
   T.mat
 }
 
-#------------------------------------------------------------
-# 4) Gather subgraph up to `chain_depth` steps from `start_word`
-#------------------------------------------------------------
-gather_subgraph <- function(T.mat, start_word, chain_depth = 1) {
-  all_words <- rownames(T.mat)
-  if (! (start_word %in% all_words)) {
-    return(list(
-      nodes = data.frame(id = "Word not found"),
-      edges = data.frame()
+# Build a chain tree with top-K alternatives at each step.
+build_chain_tree <- function(chain, T.mat, topK = 3) {
+  if (length(chain) < 1) {
+    nodes <- data.frame(id = 1, label = "Empty chain", stringsAsFactors = FALSE)
+    edges <- data.frame()
+    return(list(nodes = nodes, edges = edges))
+  }
+  
+  words <- rownames(T.mat)
+  nodes <- data.frame(id = integer(0), label = character(0), stringsAsFactors = FALSE)
+  nodes$color.background <- character(0)
+  nodes$color.border <- character(0)
+  
+  edges <- data.frame(from = integer(0), to = integer(0),
+                      label = character(0), color = character(0),
+                      stringsAsFactors = FALSE)
+  
+  node_counter <- 0
+  create_node <- function(word, step, is_chosen = FALSE) {
+    label_text <- paste0(step, ": ", word)
+    node_counter <<- node_counter + 1
+    new_id <- node_counter
+    if (is_chosen) {
+      bg_col <- "#FFD700"  # gold
+      br_col <- "#FFA500"  # orange
+    } else {
+      bg_col <- "#D1E1FF"
+      br_col <- "#666666"
+    }
+    nodes <<- rbind(nodes, data.frame(
+      id = new_id, label = label_text,
+      color.background = bg_col, color.border = br_col,
+      stringsAsFactors = FALSE
+    ))
+    return(new_id)
+  }
+  
+  create_edge <- function(from_id, to_id, prob, chosen = FALSE) {
+    edge_col <- if (chosen) "red" else "#999999"
+    lbl <- sprintf("%.2f", prob)
+    edges <<- rbind(edges, data.frame(
+      from = from_id, to = to_id,
+      label = lbl, color = edge_col, stringsAsFactors = FALSE
     ))
   }
   
-  visited <- character(0)    # track visited words
-  frontier <- c(start_word)  # current boundary
-  edges_df <- data.frame(from=character(0), to=character(0),
-                         weight=numeric(0), label=character(0))
+  current_id <- create_node(chain[1], 1, is_chosen = TRUE)
   
-  for (step in seq_len(chain_depth)) {
+  for (i in seq_len(length(chain) - 1)) {
+    current_word <- chain[i]
+    next_word <- chain[i + 1]
+    step_number <- i + 1
+    if (!(current_word %in% words)) break
+    row_idx <- which(words == current_word)
+    row_probs <- T.mat[row_idx, ]
+    nonzero_idx <- which(row_probs > 0)
+    if (length(nonzero_idx) == 0) break
+    sorted_idx <- nonzero_idx[order(row_probs[nonzero_idx], decreasing = TRUE)]
+    keep_idx <- head(sorted_idx, topK)
+    
+    chosen_child_id <- NA
+    for (idx in keep_idx) {
+      candidate_word <- words[idx]
+      prob_val <- row_probs[idx]
+      is_chosen_child <- (candidate_word == next_word)
+      child_id <- create_node(candidate_word, step_number, is_chosen = is_chosen_child)
+      create_edge(current_id, child_id, prob_val, chosen = is_chosen_child)
+      if (is_chosen_child) chosen_child_id <- child_id
+    }
+    if (is.na(chosen_child_id)) break
+    current_id <- chosen_child_id
+  }
+  list(nodes = nodes, edges = edges)
+}
+
+# Gather a subgraph for the Markov network
+gather_subgraph <- function(T.mat, start_word, chain_steps = 1) {
+  all_words <- rownames(T.mat)
+  if (!(start_word %in% all_words)) {
+    return(list(
+      nodes = data.frame(id = "Word not found", label = "Word not found", stringsAsFactors = FALSE),
+      edges = data.frame()
+    ))
+  }
+  visited <- character(0)
+  frontier <- c(start_word)
+  edges_df <- data.frame(from = character(0), to = character(0),
+                         weight = numeric(0), label = character(0),
+                         stringsAsFactors = FALSE)
+  for (step in seq_len(chain_steps)) {
     new_frontier <- character(0)
     for (w in frontier) {
       idx <- which(T.mat[w, ] > 0)
       if (length(idx) == 0) next
       successors <- colnames(T.mat)[idx]
-      # Create edges for each successor
       for (s in successors) {
         w_prob <- T.mat[w, s]
         edges_df <- rbind(edges_df, data.frame(
-          from = w,
-          to   = s,
-          weight = w_prob,
-          label  = sprintf("%.2f", w_prob),
+          from = w, to = s, weight = w_prob,
+          label = sprintf("%.2f", w_prob),
           stringsAsFactors = FALSE
         ))
       }
@@ -137,151 +192,181 @@ gather_subgraph <- function(T.mat, start_word, chain_depth = 1) {
     frontier <- setdiff(unique(new_frontier), visited)
   }
   visited <- unique(c(visited, frontier))
-  
   nodes_df <- data.frame(id = visited, label = visited, stringsAsFactors = FALSE)
   edges_df <- edges_df[edges_df$from %in% visited & edges_df$to %in% visited, ]
-  
   list(nodes = nodes_df, edges = edges_df)
 }
 
-#------------------------------------------------------------
-# 5) Mapping display names to file names (in data/ subfolder)
-#------------------------------------------------------------
-text_files <- c(
-  "Shakespeare - All's Well"                 = "allswell.txt",
-  "Oscar Wilde - The Picture of Dorian Gray" = "doriangray.txt",
-  "Douglas Adams - Hitchhiker's Guide"       = "DouglasAdams-HitchhikersGuide.txt",
-  "Jane Austen - Pride and Prejudice"        = "JaneAusten-PrideAndPrejudice.txt",
-  "E. E. Cummings - The Enormous Room"       = "EECummings-TheEnormousRoom.txt",
-  "Joseph Conrad - Heart of Darkness"        = "JosephConrad-HeartOfDarkness.txt",
-  "Aristotle - Categories"                   = "Aristotle-Categories.txt",
-  "Lewis Carroll - Alice in Wonderland"      = "LewisCarroll-AlicesAdventuresInWonderland.txt",
-  "James Joyce - Ulysses"                    = "JamesJoyce-Ulysses.txt",
-  "Bram Stoker - Dracula"                    = "BramStoker-Dracula.txt",
-  "Homer - Iliad"                            = "Homer-Iliad.txt",
-  "Charles Darwin - On the Origin of Species"= "CharlesDarwin-OnTheOriginOfSpecies.txt",
-  "King James Bible"                         = "KingJamesBible.txt",
-  "Leo Tolstoy - War and Peace"              = "LeoTolstoy-WarAndPeace.txt",
-  "Friedrich Nietzsche - Beyond Good & Evil" = "FriedrichNietzsche-BeyondGoodAndEvil.txt",
-  "Charles Dickens - Great Expectations"     = "CharlesDickens-GreatExpectations.txt",
-  "Dr Seuss"                                 = "drseuss.txt"
-)
-
-#------------------------------------------------------------
-# 6) Shiny UI
-#------------------------------------------------------------
+# -------------------------------------------------------------------------
+# 4) UI: Single Sidebar for All Tabs
+# -------------------------------------------------------------------------
 ui <- fluidPage(
-  theme = bs_theme(bootswatch = "minty", version = 5),
-  titlePanel("Markov Chain Text Generator & Network"),
-  
-  tabsetPanel(
-    tabPanel("Text Generator",
-             sidebarLayout(
-               sidebarPanel(
-                 selectInput("selected_text", "Select a text source:", names(text_files)),
-                 numericInput("n_words", "Number of words to generate:", 50, min = 1, max = 2000),
-                 numericInput("depth", "Depth of Markov chain:", 2, min = 1, max = 5),
-                 textInput("seed", "Seed text (optional, space-separated):", ""),
-                 actionButton("generate", "Generate", class = "btn-primary")
-               ),
-               mainPanel(
-                 verbatimTextOutput("generated_text")
-               )
-             )
+  theme = bs_theme(
+    bootswatch = "cosmo",
+    base_font = font_google("Roboto"),
+    code_font = font_google("Fira Code")
+  ),
+  titlePanel("Markov Text Generator"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("selected_text", "Select a text source:", names(text_files)),
+      numericInput("n_words", "Number of words to generate:", 10, min = 1, max = 2000),
+      numericInput("depth", "Markov depth:", 2, min = 1, max = 5),
+      selectizeInput("seed_words", "Seed words (optional):", choices = NULL, multiple = TRUE,
+                     options = list(placeholder = "Type or select seed words", create = TRUE)),
+      # Extra parameters for Tree and Network tabs:
+      conditionalPanel(
+        condition = "input.main_tab != 'Text Generator'",
+        hr(),
+        h4("Additional Parameters")
+      ),
+      conditionalPanel(
+        condition = "input.main_tab == 'Chain Tree'",
+        numericInput("top_k_tree", "Top K alternatives:", 3, min = 1, max = 10)
+      ),
+      conditionalPanel(
+        condition = "input.main_tab == 'Markov Network'",
+        selectizeInput("starting_word", "Starting word:", choices = NULL,
+                       options = list(placeholder = "Select or type a word", create = TRUE)),
+        numericInput("chain_steps", "Network chain depth:", 1, min = 1, max = 10)
+      )
     ),
-    tabPanel("Markov Network",
-             sidebarLayout(
-               sidebarPanel(
-                 selectInput("selected_text_network", "Select text for network:", names(text_files)),
-                 selectizeInput("starting_word", "Starting word:", choices = NULL,
-                                options = list(placeholder = 'Select a starting word')),
-                 numericInput("chain_steps", "Chain depth (steps):", 1, min = 1, max = 5),
-                 actionButton("show_network", "Show Network", class = "btn-primary")
-               ),
-               mainPanel(
+    mainPanel(
+      tabsetPanel(
+        id = "main_tab",
+        tabPanel("Text Generator",
+                 br(),
+                 actionButton("generate_text", "Generate Text", class = "btn-primary"),
+                 br(), br(),
+                 verbatimTextOutput("generated_text")
+        ),
+        tabPanel("Chain Tree",
+                 br(),
+                 actionButton("generate_tree", "Generate Chain Tree", class = "btn-primary"),
+                 br(), br(),
+                 visNetworkOutput("chain_tree_network", height = "600px")
+        ),
+        tabPanel("Markov Network",
+                 br(),
+                 actionButton("generate_network", "Generate Markov Network", class = "btn-primary"),
+                 br(), br(),
                  visNetworkOutput("markov_network", height = "600px")
-               )
-             )
+        )
+      )
     )
   )
 )
 
-#------------------------------------------------------------
-# 7) Shiny Server
-#------------------------------------------------------------
+# -------------------------------------------------------------------------
+# 5) Server
+# -------------------------------------------------------------------------
 server <- function(input, output, session) {
+  # Update seed words for Text Generator when text is selected
+  observeEvent(input$selected_text, {
+    corpus_key <- text_files[[input$selected_text]]
+    canon <- preprocessed_corpora[[corpus_key]]
+    if (is.null(canon) || length(canon) == 0) {
+      updateSelectizeInput(session, "seed_words", choices = NULL, server = TRUE)
+    } else {
+      all_words <- sort(unique(canon))
+      updateSelectizeInput(session, "seed_words", choices = all_words, server = TRUE)
+    }
+  })
   
-  # --- Text Generation ---
-  observeEvent(input$generate, {
-    file_name <- text_files[[input$selected_text]]
-    file_path <- file.path("data", file_name)
+  # -----------------------------
+  # Tab 1: Text Generator
+  # -----------------------------
+  observeEvent(input$generate_text, {
+    corpus_key <- text_files[[input$selected_text]]
+    canon <- preprocessed_corpora[[corpus_key]]
+    if (is.null(canon) || length(canon) == 0) {
+      output$generated_text <- renderText("Error: This corpus is empty or not found.")
+      return()
+    }
+    seed_vec <- input$seed_words
+    if (length(seed_vec) == 0) seed_vec <- NULL
+    chain <- generate_chain(canon, n.words = input$n_words, depth = input$depth, seed = seed_vec)
+    if (length(chain) == 0) {
+      output$generated_text <- renderText("No text generated (not enough words?).")
+    } else {
+      output$generated_text <- renderText({
+        paste(chain, collapse = " ")
+      })
+    }
+  })
+  
+  # -----------------------------
+  # Tab 2: Chain Tree
+  # -----------------------------
+  observeEvent(input$generate_tree, {
+    corpus_key <- text_files[[input$selected_text]]
+    canon <- preprocessed_corpora[[corpus_key]]
+    if (is.null(canon) || length(canon) == 0) {
+      output$chain_tree_network <- renderVisNetwork({
+        visNetwork(nodes = data.frame(id = "Error"), edges = data.frame())
+      })
+      return()
+    }
+    T.mat <- build_transition_matrix(canon)
+    seed_vec <- input$seed_words
+    if (length(seed_vec) == 0) seed_vec <- NULL
+    chain <- generate_chain(canon, n.words = input$n_words, depth = input$depth, seed = seed_vec)
+    if (length(chain) < 1) {
+      output$chain_tree_network <- renderVisNetwork({
+        visNetwork(nodes = data.frame(id = "No words generated"), edges = data.frame())
+      })
+      return()
+    }
+    subg <- build_chain_tree(chain, T.mat, topK = input$top_k_tree)
+    nodes <- subg$nodes
+    edges <- subg$edges
     
-    raw_text <- tryCatch(
-      scan(file_path, what = "character", sep = " ", quote = "",
-           strip.white = TRUE, blank.lines.skip = TRUE),
-      error = function(e) character(0)
-    )
-    
-    if (length(raw_text) == 0) {
-      output$generated_text <- renderText("Error: Could not read the file or the file is empty.")
+    # Safeguard: if the tree is too big, ask user to lower parameters
+    if (nrow(nodes) > 100) {
+      output$chain_tree_network <- renderVisNetwork({
+        visNetwork(nodes = data.frame(id = "Too many nodes; please lower chain depth or top K."), edges = data.frame())
+      })
       return()
     }
     
-    canon <- preproc(raw_text)
-    seed_vec <- if (nchar(input$seed) == 0) NULL else strsplit(input$seed, "\\s+")[[1]]
-    result <- writer(canon, n.words = input$n_words, depth = input$depth, seed = seed_vec)
-    output$generated_text <- renderText(result)
+    output$chain_tree_network <- renderVisNetwork({
+      visNetwork(nodes, edges) %>%
+        visEdges(arrows = "to", smooth = FALSE) %>%
+        visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+        visHierarchicalLayout(direction = "LR", levelSeparation = 200)
+    })
   })
   
-  # --- Update "starting_word" choices on selecting text (Markov Network) ---
-  observeEvent(input$selected_text_network, {
-    file_name <- text_files[[input$selected_text_network]]
-    file_path <- file.path("data", file_name)
-    
-    raw_text <- tryCatch(
-      scan(file_path, what = "character", sep = " ", quote = "",
-           strip.white = TRUE, blank.lines.skip = TRUE),
-      error = function(e) character(0)
-    )
-    if (length(raw_text) == 0) return()
-    
-    canon <- preproc(raw_text)
-    words <- sort(unique(canon))
-    
-    # Populate selectizeInput with all unique words
-    updateSelectizeInput(session, "starting_word", choices = words, server = TRUE)
+  # -----------------------------
+  # Tab 3: Markov Network
+  # -----------------------------
+  observeEvent(input$selected_text, {  # update starting word choices when text changes
+    corpus_key <- text_files[[input$selected_text]]
+    canon <- preprocessed_corpora[[corpus_key]]
+    if (is.null(canon) || length(canon) == 0) {
+      updateSelectizeInput(session, "starting_word", choices = NULL, server = TRUE)
+    } else {
+      all_words <- sort(unique(canon))
+      updateSelectizeInput(session, "starting_word", choices = all_words, server = TRUE)
+    }
   })
   
-  # --- Show Markov Network subgraph from "starting_word" ---
-  observeEvent(input$show_network, {
-    file_name <- text_files[[input$selected_text_network]]
-    file_path <- file.path("data", file_name)
-    
-    raw_text <- tryCatch(
-      scan(file_path, what = "character", sep = " ", quote = "",
-           strip.white = TRUE, blank.lines.skip = TRUE),
-      error = function(e) character(0)
-    )
-    
-    if (length(raw_text) == 0) {
+  observeEvent(input$generate_network, {
+    corpus_key <- text_files[[input$selected_text]]
+    canon <- preprocessed_corpora[[corpus_key]]
+    if (is.null(canon) || length(canon) == 0) {
       output$markov_network <- renderVisNetwork({
         visNetwork(nodes = data.frame(id = "Error"), edges = data.frame())
       })
       return()
     }
-    
-    canon <- preproc(raw_text)
-    T.mat <- transition(canon)
-    
-    subg <- gather_subgraph(T.mat, start_word = input$starting_word,
-                            chain_depth = input$chain_steps)
+    T.mat <- build_transition_matrix(canon)
+    subg <- gather_subgraph(T.mat, input$starting_word, input$chain_steps)
     nodes <- subg$nodes
     edges <- subg$edges
-    
-    # If there's an error or no edges
     if (nrow(nodes) == 1 && nodes$id[1] == "Word not found") {
       output$markov_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id = "Starting word not found"), edges = data.frame())
+        visNetwork(nodes = data.frame(id = "Starting word not found", label = "Starting word not found"), edges = data.frame())
       })
       return()
     }
@@ -297,19 +382,13 @@ server <- function(input, output, session) {
       }
       return()
     }
-    
-    # --- Highlight the starting word in a different color ---
-    # Give all nodes a default color
-    nodes$color.background <- "#B3CDE0"  # light bluish
-    nodes$color.border <- "#00526D"
-    
-    # Give the starting word a distinct color
+    nodes$color.background <- "#D1E1FF"
+    nodes$color.border <- "#666666"
     start_idx <- which(nodes$id == input$starting_word)
     if (length(start_idx) == 1) {
-      nodes$color.background[start_idx] <- "#FFD700"  # gold
-      nodes$color.border[start_idx] <- "#FFA500"      # orange
+      nodes$color.background[start_idx] <- "#FFD700"
+      nodes$color.border[start_idx] <- "#FFA500"
     }
-    
     output$markov_network <- renderVisNetwork({
       visNetwork(nodes, edges) %>%
         visEdges(arrows = "to") %>%
@@ -319,7 +398,5 @@ server <- function(input, output, session) {
   })
 }
 
-#------------------------------------------------------------
-# 8) Run the app
-#------------------------------------------------------------
 shinyApp(ui, server)
+

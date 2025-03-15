@@ -1,0 +1,12 @@
+name: MarkovTextGeneration
+title: MarkovTextGeneration
+username: franciscorichter
+account: franciscorichter
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 14252870
+bundleId: 9948162
+url: https://franciscorichter.shinyapps.io/MarkovTextGeneration/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

@@ -240,7 +240,7 @@ ui <- fluidPage(
     code_font  = font_google("Fira Code")
   ),
   
-  titlePanel("Markov Text Generator"),
+  titlePanel("Markov Text Generator !!"),
   
   sidebarLayout(
     sidebarPanel(

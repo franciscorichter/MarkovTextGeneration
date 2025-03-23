@@ -33,7 +33,7 @@ text_files <- c(
 # ----------------------------------------------------------------------------
 # 3) Markov Chain Generator for Text
 # ----------------------------------------------------------------------------
-generate_chain <- function(canon, n.words = 10, depth = 2, seed = NULL) {
+generate_chain <- function(canon, n.words = NULL, n.phrases = 2,depth = 2, seed = NULL) {
   n.tot <- length(canon)
   if (n.tot == 0) return(character(0))
   
@@ -41,10 +41,38 @@ generate_chain <- function(canon, n.words = 10, depth = 2, seed = NULL) {
   if (is.null(seed) || length(seed) == 0) {
     if (n.tot < depth) return(character(0))
     start <- sample(1:(n.tot - depth), 1)
+    while(canon[start] %in% c(".", ",", ";", ":", "?", "!")){
+      start <- sample(1:(n.tot - depth), 1)
+    }
     book  <- canon[start:(start + depth - 1)]
   } else {
     book <- seed
   }
+  
+  
+  if(is.null(n.words)){
+    # Build chain
+    while (length(which(book %in% c(".", "?", "!")))<n.phrases) {
+      lb <- length(book)
+      tempdepth <- if (lb < depth) lb else depth
+      select <- 1:(n.tot - 1)
+      for (i in seq_len(tempdepth)) {
+        idx <- which(canon == book[lb - i + 1])
+        idx <- idx[idx < n.tot]
+        idx <- idx + i - 1
+        select <- intersect(select, idx)
+      }
+      if (length(select) == 0) {
+        selection <- sample(canon, 1)
+      } else if (length(select) == 1) {
+        selection <- canon[select + 1]
+      } else {
+        selection <- sample(canon[select + 1], 1)
+      }
+      book <- c(book, selection)
+    }
+
+  }else{
   
   # Build chain
   while (length(book) < n.words) {
@@ -66,6 +94,9 @@ generate_chain <- function(canon, n.words = 10, depth = 2, seed = NULL) {
     }
     book <- c(book, selection)
   }
+    
+  }
+  
   book
 }
 
@@ -261,7 +292,21 @@ ui <- fluidPage(
       # Text Generator inputs
       conditionalPanel(
         condition = "input.main_tab == 'Text Generator'",
-        numericInput("n_words", "Number of words (Text Gen):", 10, min = 1, max = 2000),
+        
+        selectInput("word_or_phrase", "Generate by number of", c("sentences", "words")),
+        
+        conditionalPanel(
+          condition = "input.word_or_phrase == 'words' ",
+          numericInput("n_words", "Number of words (Text Gen):", 10, min = 1, max = 2000)
+        )
+        ,
+        
+        conditionalPanel(
+          condition = "input.word_or_phrase == 'sentences' ",
+          numericInput("n_phrases", "Number of sentences (Text Gen):", 2, min = 1, max = 20)
+        ),
+        
+        
         numericInput("markov_depth", "Markov depth (Text Gen):", 2, min = 1, max = 5),
         actionButton("generate_text", "Generate Text", class = "btn-primary")
       ),
@@ -305,10 +350,11 @@ server <- function(input, output, session) {
     if (is.null(canon) || length(canon) == 0) {
       updateSelectizeInput(session, "seed_words", choices = NULL, server = TRUE)
     } else {
-      all_words <- sort(unique(canon))
+      all_words <- sort(setdiff(unique(canon), c(".", ",", ";", ":", "?", "!")))
       updateSelectizeInput(session, "seed_words", choices = all_words, server = TRUE)
     }
   })
+  
   
   # ---------------------- Tab 1: Text Generator ----------------------
   observeEvent(input$generate_text, {
@@ -319,12 +365,24 @@ server <- function(input, output, session) {
       return()
     }
     
+    
+    
     seed_vec <- input$seed_words
     if (length(seed_vec) == 0) seed_vec <- NULL
     
+    if(input$word_or_phrase=="sentences"){
+      n_phrases<-input$n_phrases
+      n_words <- NULL
+    }else if (input$word_or_phrase=="words"){
+      n_words<-input$n_words
+      n_phrases <- NULL
+    }
+    
+    
     chain <- generate_chain(
       canon   = canon,
-      n.words = input$n_words,
+      n.words = n_words,
+      n.phrases = n_phrases,
       depth   = input$markov_depth,
       seed    = seed_vec
     )

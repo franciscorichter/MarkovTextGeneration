@@ -1,6 +1,11 @@
 library(shiny)
 library(bslib)
 library(visNetwork)
+library(shinycssloaders)  # <- make sure to install this
+
+# ----------------------------------------------------------------------------
+# 1) Load Preprocessed Data
+# ----------------------------------------------------------------------------
 
 # ----------------------------------------------------------------------------
 # 1) Load Preprocessed Data
@@ -71,29 +76,29 @@ generate_chain <- function(canon, n.words = NULL, n.phrases = 2,depth = 2, seed 
       }
       book <- c(book, selection)
     }
-
+    
   }else{
-  
-  # Build chain
-  while (length(book) < n.words) {
-    lb <- length(book)
-    tempdepth <- if (lb < depth) lb else depth
-    select <- 1:(n.tot - 1)
-    for (i in seq_len(tempdepth)) {
-      idx <- which(canon == book[lb - i + 1])
-      idx <- idx[idx < n.tot]
-      idx <- idx + i - 1
-      select <- intersect(select, idx)
+    
+    # Build chain
+    while (length(book) < n.words) {
+      lb <- length(book)
+      tempdepth <- if (lb < depth) lb else depth
+      select <- 1:(n.tot - 1)
+      for (i in seq_len(tempdepth)) {
+        idx <- which(canon == book[lb - i + 1])
+        idx <- idx[idx < n.tot]
+        idx <- idx + i - 1
+        select <- intersect(select, idx)
+      }
+      if (length(select) == 0) {
+        selection <- sample(canon, 1)
+      } else if (length(select) == 1) {
+        selection <- canon[select + 1]
+      } else {
+        selection <- sample(canon[select + 1], 1)
+      }
+      book <- c(book, selection)
     }
-    if (length(select) == 0) {
-      selection <- sample(canon, 1)
-    } else if (length(select) == 1) {
-      selection <- canon[select + 1]
-    } else {
-      selection <- sample(canon[select + 1], 1)
-    }
-    book <- c(book, selection)
-  }
     
   }
   
@@ -262,6 +267,35 @@ build_chain_tree <- function(chain, T.mat, branching_factor = 3) {
 }
 
 # ----------------------------------------------------------------------------
+# 2) Map User-Friendly Names to Corpus Keys
+# ----------------------------------------------------------------------------
+text_files <- c(
+  "Shakespeare - All's Well"                 = "allswell",
+  "Oscar Wilde - The Picture of Dorian Gray" = "doriangray",
+  "Douglas Adams - Hitchhiker's Guide"       = "DouglasAdams-HitchhikersGuide",
+  "Jane Austen - Pride and Prejudice"        = "JaneAusten-PrideAndPrejudice",
+  "E. E. Cummings - The Enormous Room"       = "EECummings-TheEnormousRoom",
+  "Joseph Conrad - Heart of Darkness"        = "JosephConrad-HeartOfDarkness",
+  "Aristotle - Categories"                   = "Aristotle-Categories",
+  "Lewis Carroll - Alice in Wonderland"      = "LewisCarroll-AlicesAdventuresInWonderland",
+  "James Joyce - Ulysses"                    = "JamesJoyce-Ulysses",
+  "Bram Stoker - Dracula"                    = "BramStoker-Dracula",
+  "Homer - Iliad"                            = "Homer-Iliad",
+  "Charles Darwin - On the Origin of Species"= "CharlesDarwin-OnTheOriginOfSpecies",
+  "King James Bible"                         = "KingJamesBible",
+  "Leo Tolstoy - War and Peace"              = "LeoTolstoy-WarAndPeace",
+  "Friedrich Nietzsche - Beyond Good & Evil" = "FriedrichNietzsche-BeyondGoodAndEvil",
+  "Charles Dickens - Great Expectations"     = "CharlesDickens-GreatExpectations",
+  "Dr Seuss"                                 = "drseuss"
+)
+
+# ----------------------------------------------------------------------------
+# ... Your functions: generate_chain, build_transition_matrix, build_chain_tree
+# (Insert them here unchanged)
+# ----------------------------------------------------------------------------
+# Due to space, I won't repeat all three function blocks here — they remain as-is from your original app.
+
+# ----------------------------------------------------------------------------
 # 6) Shiny UI
 # ----------------------------------------------------------------------------
 ui <- fluidPage(
@@ -271,47 +305,58 @@ ui <- fluidPage(
     code_font  = font_google("Fira Code")
   ),
   
-  titlePanel("Markov Text Generator !!"),
+  tags$head(
+    tags$style(HTML("
+      .shiny-input-container { margin-bottom: 15px; }
+      .btn-primary {
+        background-color: #0066cc;
+        border-color: #005cbf;
+      }
+      .btn-primary:hover {
+        background-color: #005cbf;
+      }
+      .generated-text p {
+        text-align: justify;
+        line-height: 1.5;
+        font-size: 1.1em;
+      }
+    "))
+  ),
+  
+  titlePanel("Markov Text Generator"),
   
   sidebarLayout(
     sidebarPanel(
-      selectInput("selected_text", "Select a text source:", names(text_files)),
-      
-      # Shared seed words
-      selectizeInput(
-        "seed_words",
-        "Seed words (optional):",
-        choices = NULL,
-        multiple = TRUE,
-        options = list(
-          placeholder = "Type or select seed words",
-          create = TRUE
-        )
+      div(class = "mb-3",
+          selectInput("selected_text", "Select a text source:", names(text_files))
+      ),
+      div(class = "mb-3",
+          selectizeInput("seed_words", "Seed words (optional):",
+                         choices = NULL,
+                         multiple = TRUE,
+                         options = list(
+                           placeholder = "Type or select seed words",
+                           create = TRUE
+                         ))
       ),
       
-      # Text Generator inputs
       conditionalPanel(
         condition = "input.main_tab == 'Text Generator'",
-        
         selectInput("word_or_phrase", "Generate by number of", c("sentences", "words")),
         
         conditionalPanel(
           condition = "input.word_or_phrase == 'words' ",
           numericInput("n_words", "Number of words (Text Gen):", 10, min = 1, max = 2000)
-        )
-        ,
-        
+        ),
         conditionalPanel(
           condition = "input.word_or_phrase == 'sentences' ",
           numericInput("n_phrases", "Number of sentences (Text Gen):", 2, min = 1, max = 20)
         ),
         
-        
         numericInput("markov_depth", "Markov depth (Text Gen):", 2, min = 1, max = 5),
         actionButton("generate_text", "Generate Text", class = "btn-primary")
       ),
       
-      # Chain Tree inputs
       conditionalPanel(
         condition = "input.main_tab == 'Chain Tree'",
         numericInput("n_evolutions", "Number of evolutions (Tree length):", 10, min = 1, max = 200),
@@ -319,18 +364,19 @@ ui <- fluidPage(
         actionButton("generate_tree", "Generate Tree", class = "btn-primary")
       )
     ),
+    
     mainPanel(
       tabsetPanel(
         id = "main_tab",
         
         tabPanel("Text Generator",
                  br(),
-                 verbatimTextOutput("generated_text")
+                 withSpinner(htmlOutput("generated_text", class = "generated-text"))
         ),
         
         tabPanel("Chain Tree",
                  br(),
-                 visNetworkOutput("chain_tree_network", height = "600px")
+                 withSpinner(visNetworkOutput("chain_tree_network", height = "600px"))
         )
       )
     )
@@ -342,7 +388,6 @@ ui <- fluidPage(
 # ----------------------------------------------------------------------------
 server <- function(input, output, session) {
   
-  # Update seed words after user picks a text
   observeEvent(input$selected_text, {
     corpus_key <- text_files[[ input$selected_text ]]
     canon <- preprocessed_corpora[[ corpus_key ]]
@@ -355,29 +400,27 @@ server <- function(input, output, session) {
     }
   })
   
-  
-  # ---------------------- Tab 1: Text Generator ----------------------
+  # ---------------------- Text Generator ----------------------
   observeEvent(input$generate_text, {
     corpus_key <- text_files[[ input$selected_text ]]
     canon <- preprocessed_corpora[[ corpus_key ]]
     if (is.null(canon) || length(canon) == 0) {
-      output$generated_text <- renderText("Error: This corpus is empty or not found.")
+      output$generated_text <- renderUI({
+        HTML("<p>Error: This corpus is empty or not found.</p>")
+      })
       return()
     }
-    
-    
     
     seed_vec <- input$seed_words
     if (length(seed_vec) == 0) seed_vec <- NULL
     
     if(input$word_or_phrase=="sentences"){
-      n_phrases<-input$n_phrases
+      n_phrases <- input$n_phrases
       n_words <- NULL
-    }else if (input$word_or_phrase=="words"){
-      n_words<-input$n_words
+    } else {
+      n_words <- input$n_words
       n_phrases <- NULL
     }
-    
     
     chain <- generate_chain(
       canon   = canon,
@@ -388,42 +431,42 @@ server <- function(input, output, session) {
     )
     
     if (length(chain) == 0) {
-      output$generated_text <- renderText("No text generated (maybe not enough words?).")
+      output$generated_text <- renderUI({
+        HTML("<p>No text generated (maybe not enough words?).</p>")
+      })
     } else {
-      output$generated_text <- renderText({
-        paste(chain, collapse = " ")
+      output$generated_text <- renderUI({
+        HTML(paste0("<p>", paste(chain, collapse = " "), "</p>"))
       })
     }
   })
   
-  # ---------------------- Tab 2: Chain Tree ----------------------
+  # ---------------------- Chain Tree ----------------------
   observeEvent(input$generate_tree, {
     corpus_key <- text_files[[ input$selected_text ]]
     canon <- preprocessed_corpora[[ corpus_key ]]
     if (is.null(canon) || length(canon) == 0) {
       output$chain_tree_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id="Error"), edges=data.frame())
+        visNetwork(nodes = data.frame(id = "Error"), edges = data.frame())
       })
       return()
     }
     
-    # We'll fix Markov depth = 1 for the chain used in the tree
     T.mat <- build_transition_matrix(canon)
     
     seed_vec <- input$seed_words
     if (length(seed_vec) == 0) seed_vec <- NULL
     
-    # Generate a chain of length n_evolutions, ignoring top K at generation time
     chain <- generate_chain(
       canon   = canon,
       n.words = input$n_evolutions,
-      depth   = 1,   # fixed for the tree
+      depth   = 1,
       seed    = seed_vec
     )
     
     if (length(chain) < 1) {
       output$chain_tree_network <- renderVisNetwork({
-        visNetwork(nodes = data.frame(id="No words generated"), edges=data.frame())
+        visNetwork(nodes = data.frame(id = "No words generated"), edges = data.frame())
       })
       return()
     }
@@ -436,11 +479,10 @@ server <- function(input, output, session) {
     nodes <- subg$nodes
     edges <- subg$edges
     
-    # If the tree is huge, show a message
     if (nrow(nodes) > 150) {
       output$chain_tree_network <- renderVisNetwork({
         visNetwork(
-          nodes = data.frame(id="Tree is too large. Lower 'Number of evolutions' or 'Branching factor'."),
+          nodes = data.frame(id = "Tree is too large. Lower 'Number of evolutions' or 'Branching factor'."),
           edges = data.frame()
         )
       })
@@ -449,12 +491,16 @@ server <- function(input, output, session) {
     
     output$chain_tree_network <- renderVisNetwork({
       visNetwork(nodes, edges) %>%
-        visEdges(arrows="to", smooth=FALSE) %>%
-        visOptions(highlightNearest=TRUE, nodesIdSelection=TRUE) %>%
-        visHierarchicalLayout(direction="LR", levelSeparation=200)
+        visEdges(arrows = "to", smooth = FALSE) %>%
+        visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+        visHierarchicalLayout(direction = "LR", levelSeparation = 200)
     })
   })
 }
 
+# ----------------------------------------------------------------------------
+# 8) Run App
+# ----------------------------------------------------------------------------
 shinyApp(ui, server)
+
 
